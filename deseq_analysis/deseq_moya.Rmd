@@ -1,0 +1,167 @@
+---
+title: "Moya et al. 2022"
+output: html_notebook
+---
+
+This notebook is related to the DE analysis for Moya et al 2022
+The input is a set of abundance tables from running Kallisto
+that are read in to run a DESEQ2 analysis. The samples are split into host
+and zooxs.
+
+The output is a nested directory structure hierarchically ordered by (in order)
+host or zooxs
+Timepoint
+Long term rearing temperature
+shrinkage or no shrinkage
+
+In each directory for each of the contrasts (e.g. 33vs30, 36vs30 and 39vs30)
+the DESEQ results dataframe is written out in csv format and as an r object.
+The r object can be read in using the function readRDS.
+
+I have calculated the contrasts for host and zooxs and with and without shrinkage.
+
+Load required packages.
+```{r}
+library(tximport)
+library(readr)
+library(rhdf5)
+library("DESeq2")
+library(apeglm)
+library(ashr)
+```
+
+Parameters that will need changing per environment
+```{r}
+moya.base.dir = "/Volumes/Extreme SSD/projects/20220329_moya"
+
+# Full path to the meta info file
+meta.info.path = file.path(moya.base.dir, "deseq_analysis/moya_meta_info.csv")
+
+# The directory containing the host and zooxs directories that 
+# contain the by sample kallisto results
+kallisto.base.dir = file.path(moya.base.dir, "kallisto_quant_results")
+
+# Directory where the results will be saved
+base.output.dir = file.path(moya.base.dir, "deseq_results")
+
+# A random selection of a host and a zooxs kallisto output file to get the gene
+# sets from
+example.abund.tab.path.host = file.path(kallisto.base.dir, "host/T1S1_11wkLT25_-_30_RNASeq_a100/abundance.tsv")
+example.abund.tab.path.zooxs = file.path(kallisto.base.dir, "zooxs/T1S1_11wkLT25_-_30_RNASeq_a100/abundance.tsv")
+
+# Change host.zooxs to "zooxs" if you want to process the zooxs.
+host.zooxs = "host"
+
+# Whether to perform shrinkage or not
+# see here: http://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#log-fold-change-shrinkage-for-visualization-and-ranking
+perform.shrinkage = FALSE
+# The shrinkage method to implement
+shrinkage.method.string = "ashr"
+# In addition we will calculate the svalues using the ash function
+# The S-values are calculated using the log2FoldChange and lfcSE variables
+# or the non-shrinkage results
+# They are appended to the results df before output.
+```
+
+
+Get the meta info
+```{r}
+meta.info = read.csv(meta.info.path)
+meta.info$Timepoint = as.factor(meta.info$Timepoint)
+meta.info$CBASS.temperature = as.factor(meta.info$CBASS.temperature)
+```
+
+Get the list of files for the given experimental setup
+```{r}
+get.file.list = function(tp, lt){
+  
+  files <- file.path(kallisto.base.dir, host.zooxs, meta.info.sub$RNAseq, "abundance.h5")
+  names(files) <- meta.info.sub$RNAseq
+  return(files)
+}
+```
+
+Make tx2gene df
+```{r}
+make.tx2gene.df = function(host.zooxs){
+  # Create the tx2gene files that maps transcript to gene
+  # In our case we are already working with gene so we will
+  # create a dummy df that maps gene to gene
+  # We will get the gene list from a random abundance table
+  if (host.zooxs == "host"){
+    gene.list = read.table(example.abund.tab.path.host, header = T)$target_id
+  }else if(host.zooxs == "zooxs"){
+    gene.list = read.table(example.abund.tab.path.zooxs, header = T)$target_id
+  } else{
+    stop(paste0("Unreconised value for host.zooxs: ", host.zooxs, "."))
+  }
+  return(data.frame("TXNAME"=gene.list, "GENEID"=gene.list))
+}    
+    
+```
+
+Output the CBASS.temperature contrasts (30vs33, 30vs36, 30vs39)
+within the specified Timepoint and LT as DESEQ results objects
+to a directory that is constructed from the 
+```{r}
+output.results = function(dds, out.base.dir.params){
+  for (contrast.coef in resultsNames(dds)[-1]){
+
+    if (perform.shrinkage){
+      # See here for further details https://rdrr.io/bioc/DESeq2/man/lfcShrink.html
+      # In the PNAS paper that chris sent me:
+      # https://onlinelibrary.wiley.com/doi/full/10.1111/mec.16064
+      # that I was supposed to be following as the methods they used the S-value
+      # to determine significant genes. The lfcShrink output does not give
+      # you the S-value output. As such I will append this to the
+      # res data.frame before output
+      # The S-values are calculated using the log2FoldChange and lfcSE variables
+      # or the non-shrinkage results
+      res.no.shrink = results(dds, name=contrast.coef)
+      ash.res = ash(res.no.shrink$log2FoldChange, res.no.shrink$lfcSE)
+      res.shrink = lfcShrink(dds, coef=contrast.coef, type=shrinkage.method.string)
+      res.shrink$svalue = ash.res$result$svalue
+      save.path.csv = file.path(out.base.dir.params, "shrinkage", paste0(contrast.coef, ".csv"))
+      save.path.obj = file.path(out.base.dir.params, "shrinkage", paste0(contrast.coef, ".rds"))
+      if (!dir.exists(file.path(out.base.dir.params, "shrinkage"))) {dir.create(file.path(out.base.dir.params, "shrinkage"), recursive = T)}
+      write.csv(as.data.frame(res.shrink), file=save.path.csv)
+      saveRDS(res.shrink, file=save.path.obj)
+    }else{
+      save.path.csv = file.path(out.base.dir.params, "no_shrinkage", paste0(contrast.coef, ".csv"))
+      save.path.obj = file.path(out.base.dir.params, "no_shrinkage", paste0(contrast.coef, ".rds"))
+      res = results(dds, name=contrast.coef)
+      if (!dir.exists(file.path(out.base.dir.params, "no_shrinkage"))) {dir.create(file.path(out.base.dir.params, "no_shrinkage"), recursive = T)}
+      write.csv(as.data.frame(res), file=save.path.csv)
+      saveRDS(res, file=save.path.obj)
+    }
+    
+  }
+}
+```
+
+
+Currently we have been asked to analyse DE between the CBASS.temperature
+as 30v33, 30v36, 30v39 for each of the Timepoint and LT combinations
+Aurelie will conduct further analyses as necessary.
+We will work in a nested for loops here cycling through
+Timepoint and then within that Long.term.temp.1
+```{r}
+for (tp in c("T1", "T2", "T3")){
+  for (lt in c(25, 27, 30)){
+    print(paste0("Calculating: ", "Timepoint: ", tp, "LT: ", lt))
+    flush.console()
+    meta.info.sub = meta.info[(meta.info$Timepoint == tp) & (meta.info$Long.term.temp.1 == lt), ]
+    files = get.file.list(tp, lt)
+    tx2gene = make.tx2gene.df(host.zooxs)
+    txi = tximport(files, type = "kallisto", tx2gene = tx2gene)
+    dds = DESeqDataSetFromTximport(txi, colData = meta.info.sub, design = ~ CBASS.temperature)
+    dds = DESeq(dds)
+    # Output the results for the 30vs33, 30vs36, 30vs39
+    output.results(dds=dds, out.base.dir.params=file.path(base.output.dir, host.zooxs, tp, lt))
+  }
+}
+```
+
+
+
+
